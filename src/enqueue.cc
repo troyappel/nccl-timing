@@ -421,6 +421,8 @@ static inline ncclResult_t getCollNetSupport(struct ncclInfo* info, int* collNet
 // numPipeOps: number of pipelined ops. Can be greater than 1 in aggregation mode. Used to adjust latency.
 static ncclResult_t getAlgoInfo(struct ncclInfo* info, int collNetTypeSupport, int numPipeOps) {
   struct ncclComm* comm = info->comm;
+
+  // troy
   if (comm->nRanks == 1) {
     info->algorithm = NCCL_ALGO_RING;
     info->protocol = NCCL_PROTO_SIMPLE;
@@ -695,7 +697,7 @@ reg_fallback:
 // Compute enqueue element, save it in list
 // Compute CUDA launch parameters
 // Capture time code in view of CUDA graph
-static ncclResult_t ncclSetupCollKernel(struct ncclInfo* info) {
+ncclResult_t ncclSetupCollKernel(struct ncclInfo* info) {
   ncclComm_t comm = info->comm;
   if (comm->nRanks == 1 &&
       // User-defined reduction ops may need alter the data even for unitary reductions
@@ -1389,6 +1391,73 @@ ncclResult_t ncclEnqueueCheck(struct ncclInfo* info) {
     NCCLCHECKGOTO(ncclLaunchKernel(comm), ret, end);
     NCCLCHECKGOTO(ncclRecordEvents(comm), ret, end);
     NCCLCHECKGOTO(ncclLaunchReset(comm), ret, end);
+  }
+end:
+  if (isAsync && savedDev != -1) CUDACHECK(cudaSetDevice(savedDev));
+  if (isAsync) ncclAsyncErrCheck(ret);
+  return ret;
+}
+
+ncclResult_t ncclEnqueueCheckDummy(struct ncclInfo* info) {
+  ncclResult_t ret = ncclSuccess;
+  bool isAsync = ncclAsyncMode();
+  int savedDev = -1;
+  // Check arguments
+  NCCLCHECK(PtrCheck(info->comm, info->opName, "comm"));
+  if (isAsync && info->comm->checkPointers) {
+    CUDACHECKGOTO(cudaGetDevice(&savedDev), ret, end);
+    CUDACHECKGOTO(cudaSetDevice(info->comm->cudaDev), ret, end);
+  }
+  NCCLCHECKGOTO(ArgsCheck(info), ret, end);
+
+  // Copy reduction op state from op handle into info struct here since the
+  // op handle may be destroyed before ncclGroupEnd().
+  NCCLCHECKGOTO(hostToDevRedOp(&info->opFull, info->op, info->datatype, info->comm), ret, end);
+
+  // Launch asynchronously if needed
+  if (isAsync) {
+    // Always register comm even in case of error to make sure ncclGroupEnd
+    // cleans it up.
+    NCCLCHECKGOTO(ncclAsyncColl(info->comm), ret, end);
+    NCCLCHECKGOTO(checkSetStream(info), ret, end);
+
+    INFO(NCCL_COLL,"%s: opCount %lx sendbuff %p recvbuff %p count %zi datatype %d op %d root %d comm %p [nranks=%d] stream %p",
+        info->opName, info->comm->opCount, info->sendbuff, info->recvbuff, info->count,
+        info->datatype, info->op, info->root, info->comm, info->comm->nRanks, info->stream);
+
+    if (info->coll == ncclFuncSend || info->coll == ncclFuncRecv) { //p2p stored separately
+      NCCLCHECKGOTO(ncclSaveP2p(info), ret, end);
+    } else {
+      NCCLCHECKGOTO(ncclSaveAsyncColl(info), ret, end);
+    }
+  } else {
+    NCCLCHECKGOTO(checkSetStream(info), ret, end);
+
+    INFO(NCCL_COLL,"%s: opCount %lx sendbuff %p recvbuff %p count %zi datatype %d op %d root %d comm %p [nranks=%d] stream %p",
+        info->opName, info->comm->opCount, info->sendbuff, info->recvbuff, info->count,
+        info->datatype, info->op, info->root, info->comm, info->comm->nRanks, info->stream);
+
+    // Check whether we are in cuda graph mode
+    cudaGraph_t graph;
+    ncclComm_t comm = info->comm;
+    NCCLCHECKGOTO(ncclGetCudaGraph(comm, &graph), ret, end);
+
+    // Common part between graph mode and non-graph mode
+    NCCLCHECKGOTO(ncclSetupCollKernel(info), ret, end);
+
+    // Host setup
+    if (comm->usingCudaGraph) {
+      NCCLCHECKGOTO(ncclCudaGraphHostSetup(comm, graph), ret, end);
+    } else {
+      ncclEnqueueHostSetup<0>(comm->enqueueInfo);
+      NCCLCHECKGOTO(comm->enqueueInfo->ret, ret, end);
+    }
+
+    // Common part between graph mode and non-graph mode
+    // NCCLCHECKGOTO(ncclLaunchBarrier(comm), ret, end);
+    // NCCLCHECKGOTO(ncclLaunchKernel(comm), ret, end);
+    // NCCLCHECKGOTO(ncclRecordEvents(comm), ret, end);
+    // NCCLCHECKGOTO(ncclLaunchReset(comm), ret, end);
   }
 end:
   if (isAsync && savedDev != -1) CUDACHECK(cudaSetDevice(savedDev));

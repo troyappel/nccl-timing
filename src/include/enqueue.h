@@ -17,6 +17,9 @@
 size_t ncclKernMaxLocalSize();
 ncclResult_t ncclKernSetSharedMemoryCarveout(int carveOut);
 ncclResult_t ncclEnqueueCheck(struct ncclInfo* info);
+
+// Troy
+ncclResult_t ncclEnqueueCheckDummy(struct ncclInfo* info);
 ncclResult_t ncclCpuBarrierIn(struct ncclComm* comm, int* isLast);
 ncclResult_t ncclCpuBarrierLast(struct ncclComm* comm);
 ncclResult_t ncclCpuBarrierOut(struct ncclComm* comm);
@@ -130,4 +133,8 @@ skip:
   comm->nQueueInfoDestroyed++;
   return;
 }
+
+// Troy: include this in header
+ncclResult_t ncclSetupCollKernel(struct ncclInfo* info);
+
 #endif // End include guard
